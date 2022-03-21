@@ -2,7 +2,6 @@ package breadboard;
 
 import java.io.IOException;
 import java.net.SocketTimeoutException;
-import java.util.Random;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import io.undertow.Undertow;
@@ -28,11 +27,11 @@ import org.apache.http.message.BasicNameValuePair;
 import org.apache.http.protocol.HttpContext;
 
 /**
- * Reproducing issue for apache client not using CredentialsProvider after prior
- * timeout.
+ * Reproduces issue for apache client not utilizing provided CredentialsProvider
+ * after prior timeout.
  *
- * Test scenario: submitting 3 requests to same site with 3 different set of
- * credentials, timing out response on first authorized request.
+ * Test scenario: submitting 3 requests to the same site with 3 different set
+ * of credentials, timing out response on first authorized request.
  *
  * Expected result: 3 pairs of http requests observed on http server (with pair
  * defined as sequence of unauthorized and authorized requests), with this
@@ -40,49 +39,43 @@ import org.apache.http.protocol.HttpContext;
  *
  * ======== Starting the test
  * ======== Sending client request 1
- * ======== Received server request 1 at /account/2544
+ * ======== Received server request 1 at /account/0001
  * ======== Missing Authorization header, returning 401
- * ======== Received server request 2 at /account/2544
- * ======== Authorization password pass-2544 matches account
+ * ======== Received server request 2 at /account/0001
+ * ======== Authorization password pass-0001 matches account
  * ======== Http server trigerring socket timeout, sleeping
  * ======== Client request 1 timed out
  * ======== Sending client request 2
- * ======== Received server request 3 at /account/1656
+ * ======== Received server request 3 at /account/0002
  * ======== Missing Authorization header, returning 401
- * ======== Received server request 4 at /account/1656
- * ======== Authorization password pass-1656 matches account
+ * ======== Received server request 4 at /account/0002
+ * ======== Authorization password pass-0002 matches account
  * ======== Http server returning 200 for server request 4
  * ======== Response to client request 2 - 200
  * ======== Sending client request 3
- * ======== Received server request 5 at /account/5598
- * ======== Authorization password pass-1656 does not match account 5598
- * ======== Received server request 6 at /account/5598
- * ======== Authorization password pass-5598 matches account
+ * ======== Received server request 5 at /account/0003
+ * ======== Authorization password pass-0002 does not match account 0003
+ * ======== Received server request 6 at /account/0003
+ * ======== Authorization password pass-0003 matches account
  * ======== Http server returning 200 for server request 6
  * ======== Response to client request 3 - 200
- *
- * Note: ideally, apache http client should realize that since different
- * CredentialsProvider is sent to it, previously used/cached credentials should
- * not be reused, but sending wrong credentials followed by right credentials
- * (while far from being ideal) still allows arriving at correct result;
- * workaround is to reset AuthState manually, that prevents sending wrong
- * credentials, fixing enless 401's as well.
  *
  * Actual result: 4 http requests observed on http server (one pair and two
  * singular requests), with this output:
  *
- * ======= Received server request 1 at /account/7039
+ * ======== Starting the test
+ * ======== Received server request 1 at /account/0001
  * ======== Missing Authorization header, returning 401
- * ======== Received server request 2 at /account/7039
- * ======== Authorization password pass-7039 matches account
+ * ======== Received server request 2 at /account/0001
+ * ======== Authorization password pass-0001 matches account
  * ======== Http server trigerring socket timeout, sleeping
  * ======== Client request 1 timed out
  * ======== Sending client request 2
- * ======== Received server request 3 at /account/4958
- * ======== Authorization password pass-7039 does not match account 4958
+ * ======== Received server request 3 at /account/0002
+ * ======== Authorization password pass-0001 does not match account 0002
  * ======== Response to client request 2 - 401
  * ======== Sending client request 3
- * ======== Received server request 4 at /account/6491
+ * ======== Received server request 4 at /account/0003
  * ======== Missing Authorization header, returning 401
  * ======== Response to client request 3 - 401
  *
@@ -95,6 +88,20 @@ import org.apache.http.protocol.HttpContext;
  */
 public class ApacheTimeoutExample {
     private static final boolean TRIGGER_TIMEOUT = true;
+    private static final int SERVER_REQUEST_INDEX_TO_TIMEOUT = 2;
+
+    // Clearing auth-cache makes apache forget that server
+    // demands basic auth, not exactly useful in this scenario
+    // because all it does is make client ALWAYS start with
+    // unauthenticated request.
+    private static final boolean CLEAR_AUTH_CACHE = false;
+
+    // Resetting auth-state not only makes apache forget the
+    // credentials that worked for previous request (good,
+    // forces it fetch potentially different credentials from
+    // CredentialsProvider), but also fixes issues with endless
+    // fatal 401's after timeout.
+    private static final boolean RESET_AUTH_STATE = false;
 
     private static final String SERVER_HOST = "localhost";
     private static final int SERVER_PORT = 8089;
@@ -104,7 +111,6 @@ public class ApacheTimeoutExample {
 
     private static final int CONNECT_TIMEOUT = 100;
     private static final int READ_TIMEOUT = 1000;
-    private static final Random randomGenerator = new Random();
 
     public static void main( String[] args ) {
         Undertow httpServer = startHttpServer();
@@ -122,19 +128,20 @@ public class ApacheTimeoutExample {
         try {
             final CloseableHttpClient client = createHttpClient();
 
+            // using single context for the duration of whole demo session,
             final HttpClientContext context = HttpClientContext.create();
 
             for (int requestIndex = 1; requestIndex < 4 ; requestIndex++) {
                 // Lets pretend that next request is on behalf of a different user
                 // and requires different set of credentials.
-                final String randomId = generateRandomId();
+                final String accountId = generateAccountId(requestIndex);
 
-                context.setCredentialsProvider(createCredentialsProvider(randomId));
+                context.setCredentialsProvider(createCredentialsProvider(accountId));
 
                 try {
                     println("Sending client request " + requestIndex);
 
-                    CloseableHttpResponse response = client.execute(createPostRequest(randomId), context);
+                    CloseableHttpResponse response = client.execute(createPostRequest(accountId), context);
 
                     println("Response to client request " + requestIndex + " - " +
                             response.getStatusLine().getStatusCode());
@@ -142,21 +149,12 @@ public class ApacheTimeoutExample {
                 } catch (SocketTimeoutException e) {
                     println("Client request " + requestIndex + " timed out");
                 } finally {
-                    // Clearing auth-cache makes apache forget that server
-                    // demands basic auth, not exactly useful in this scenario.
-                    //
-                    if (false && context.getAuthCache() != null) {
+                    if (CLEAR_AUTH_CACHE && context.getAuthCache() != null) {
                         println("Cleared auth cache after client request " + requestIndex);
                         context.getAuthCache().clear();
                     }
-                    //
-                    // Clearing auth-sate not only makes apache forget the
-                    // credentials that worked for previous request (good,
-                    // forces it fetch potentially different credentials from
-                    // CredentialsProvider), but also fixes issues with endless
-                    // fatal 401's after timeout.
-                    //
-                    if (false && context.getTargetAuthState() != null) {
+
+                    if (RESET_AUTH_STATE && context.getTargetAuthState() != null) {
                         println("Reset auth state after client request " + requestIndex);
                         context.getTargetAuthState().reset();
                     }
@@ -192,8 +190,8 @@ public class ApacheTimeoutExample {
         return client;
     }
 
-    private static String generateRandomId() {
-        return String.format("%04d", randomGenerator.nextInt(10000));
+    private static String generateAccountId(int requestIndex) {
+        return String.format("%04d", requestIndex);
     }
 
     private static CredentialsProvider createCredentialsProvider(String randomId) {
@@ -271,7 +269,7 @@ public class ApacheTimeoutExample {
                 return;
             }
 
-            if (TRIGGER_TIMEOUT && requestIndex == 2) {
+            if (TRIGGER_TIMEOUT && requestIndex == SERVER_REQUEST_INDEX_TO_TIMEOUT) {
                 println("Http server trigerring socket timeout, sleeping");
                 try {
                     Thread.sleep(READ_TIMEOUT + 1000);

@@ -1,13 +1,25 @@
 # Sticky '401 Unauthorized' response
 
-This is an example illustrating issue with apache http client where if basic
-authentication is implemented in minimalistic way using CredentialsProvider
-class, under some conditions client enters a state where it always returns '401
-Unauthorized' response to any request to API protected by basic authentication.
+Recently it was observed that under a specific set of pre-conditions Apache's
+HttpClient could be left in a non functional state. This project is a simplified
+reproduction of the problem.
+
+More specifically, if basic authentication is implemented in minimalistic way
+passing multiple CredentialsProvider instances through same context, socket
+timeouts may cause client to enter a state where it always returns '401
+Unauthorized' response to any request to the same service.
 
 This example/test/demo is using traditional blocking http client 4.5.13, but
 identical behavior was observed using asynchronous (non-blocking) apache http
-client 4.1.4 (not covered by code in this repo).
+client 4.1.4 (not covered by code in this demo).
+
+## Desired outcome
+
+Future versions of apache http client (both blocking and non-blocking) should
+handle timeouts in such a way that socket timeouts cause only transient errors,
+without long lasting effects, even if its usage may be considered
+unconventional. If that is not possible, then usage of http client that could
+lead to this issue should fail fast.
 
 ## Issue description
 
@@ -21,10 +33,10 @@ client 4.1.4 (not covered by code in this repo).
   authorized by default, simplifying request flow and eliminating issue observed
 - if api server requires different credentials for different requests (lets say,
   endpoint's url contains account id and different accounts require different
-  credentials), then quite often wrong (cached) credentials will be sent to the
-  server before client rights itself by actually asking CredentialsProvider for
-  new credentials - this is somewhat unintuitive behavior, but it is documented
-  in javadocs, and expected
+  credentials), then quite often wrong (cached on the context) credentials will
+  be sent to the server before client rights itself by actually asking
+  CredentialsProvider for new credentials - this is somewhat unintuitive
+  behavior, but it is documented in javadocs, and expected
 - if first request from the pair of requests returns '401 Unauthorized' as it
   should, but next (properly authenticated) request times out, http client
   enters a strange 'damaged' state where for any following requests resulting in
@@ -44,6 +56,7 @@ client 4.1.4 (not covered by code in this repo).
 
 ## Workarounds discovered
 
+- use new context for every request
 - add code that forces apache client to perform preemptive authentication -
   every call to http client results in only one http request, and timeouts are
   handled properly
@@ -57,8 +70,8 @@ client 4.1.4 (not covered by code in this repo).
 
 While workarounds are a fairly good idea all by themselves (if one deals with
 api that uses multiple credentials, it is good idea to use one of those
-approaches anyway), they are not exactly intuitive and will be left out by
-majority of developers unfamiliar with the details of apache http client library.
+approaches anyway), they are not exactly intuitive and may be left out by
+many developers unfamiliar with the details of apache http client library.
 
 Default behavior in this case might be slightly inefficient (with half of http
 requests having either no credentials or wrong credentials) but it will still
@@ -80,9 +93,9 @@ without resorting to a debugger.
 
 There is a variable TRIGGER_TIMEOUT in file ApacheTimeoutExample.java, you can
 change it from 'true' to 'false', re-run the experiment, and see how it behaves
-under normal conditions (without timeout). There is also some disabled code that
-resets AuthState, you can enable it and observe disappearance of the 'sticky'
-'401 Unauthorized' responses.
+under normal conditions (without timeout). There is also flag RESET_AUTH_STATE
+that allows resetting AuthState after every request, you can enable it and
+observe disappearance of the 'sticky' '401 Unauthorized' responses.
 
 If more debugging output from apache http client is desired, modify some
 pre-existing setup in script `run.sh` (verbose logging is disabled by default).
